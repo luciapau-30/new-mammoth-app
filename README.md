@@ -1,6 +1,8 @@
 # “Go Mammoth” 
 
-A React Native app for skiers and snowboarders at MAMMZ. Track lift status, weather conditions, and your rides all in one place!!!
+A React Native app for riders at Mammoth Mountain, CA. Track lift status, weather conditions, and your rides all in one place!!!
+
+This project was born as a continuation of a previous personal web app project. I used its templates and everything I learned to add functionalities such as location and ride tracking, creating a completely new app, turning it into something fun! With the help of a bunch of online tutorials, we made it work!
 
 ##  Features
 
