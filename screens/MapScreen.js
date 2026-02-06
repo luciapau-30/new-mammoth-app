@@ -3,6 +3,31 @@ import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator } from 'rea
 import MapView, { Marker } from 'react-native-maps';
 import axios from 'axios';
 
+/*
+ * DATA SOURCE DECISION: Liftie API
+ *
+ * Why Liftie over web scraping Mammoth's site directly?
+ *
+ * PROS OF LIFTIE:
+ * - Free, open-source API with no authentication needed
+ * - Returns structured JSON (easy to parse vs. HTML scraping)
+ * - Maintained by community - they handle Mammoth's site changes
+ * - Built-in caching (60s) reduces load on Mammoth's servers
+ * - No CORS issues, no backend proxy needed
+ * - No legal gray area (scraping ToS concerns)
+ * - Lower maintenance - API rarely breaks vs. HTML selectors
+ *
+ * CONS OF DIRECT SCRAPING:
+ * - Mammoth uses React (requires Puppeteer/headless browser)
+ * - Fragile - breaks when Mammoth updates their UI
+ * - Performance overhead (full page download + rendering)
+ * - Ethical concerns (puts load on Mammoth's servers)
+ * - Could violate Terms of Service
+ * - More complex code (100+ lines vs. simple fetch)
+ *
+ * DECISION: Use Liftie API as primary source, fall back to demo data if unavailable.
+ */
+
 export default function MammothMapView() {
   const [selectedLift, setSelectedLift] = useState(null);
   const [lifts, setLifts] = useState([]);
@@ -10,6 +35,7 @@ export default function MammothMapView() {
   const [error, setError] = useState(null);
   const [weatherData, setWeatherData] = useState(null);
   const [showWeather, setShowWeather] = useState(false);
+  const [usingFallbackData, setUsingFallbackData] = useState(false);
 
   // Mammoth Mountain coordinates
   const mammothRegion = {
@@ -30,90 +56,101 @@ export default function MammothMapView() {
   const fetchLiftData = async () => {
     try {
       setLoading(true);
-      // RapidAPI Ski Resort Conditions
+
+      // Liftie.info API - Free, no auth required
+      // Endpoint: https://liftie.info/api/resort/{resort-id}
+      // Documentation: https://github.com/pirxpilot/liftie
       const response = await axios.get(
-        'https://ski-resort-conditions.p.rapidapi.com/get_snow_report',
+        'https://liftie.info/api/resort/mammoth-lakes',
         {
-          params: {
-            id: '1143859b' // Mammoth Mountain ID
-          },
-          headers: {
-            'x-rapidapi-host': 'ski-resort-conditions.p.rapidapi.com',
-            'x-rapidapi-key': '87f8a2e161mshaad318e941231b2p1f647djsn5fc3c2bc4f8a'
-          }
+          timeout: 10000 // 10 second timeout
         }
       );
 
       const data = response.data;
-      
-      if (data) {
-        // Parse lift data from the report
-        const liftData = parseLiftData(data);
+
+      console.log('✅ Liftie API Response received');
+      console.log('Lifts open:', data.lifts?.stats?.open, '/', Object.keys(data.lifts?.status || {}).length);
+      console.log('Weather:', data.weather?.temperature?.max + '°F', data.weather?.conditions);
+
+      if (data && data.lifts && data.lifts.status) {
+        // Parse Liftie data format
+        const liftData = parseLiftieData(data);
         setLifts(liftData);
         setWeatherData(data); // Store full data for weather/snow report
         setError(null);
+        setUsingFallbackData(false);
       } else {
-        setError('No data available');
+        throw new Error('Invalid data format from Liftie API');
       }
       setLoading(false);
     } catch (err) {
-      console.error('Error fetching lift data:', err);
-      setError('Failed to load lift data');
+      console.error('❌ Error fetching lift data:', err);
+      console.error('Error details:', err.response?.data || err.message);
+
+      // Determine specific error message
+      let errorMessage = 'Using demo data - ';
+      if (err.code === 'ECONNABORTED') {
+        errorMessage += 'API request timed out';
+      } else if (err.response?.status === 404) {
+        errorMessage += 'Resort data not found';
+      } else if (err.response?.status >= 500) {
+        errorMessage += 'Liftie API temporarily down';
+      } else if (!navigator.onLine) {
+        errorMessage += 'No internet connection';
+      } else {
+        errorMessage += 'API connection failed';
+      }
+
+      setError(errorMessage);
       setLoading(false);
+      setUsingFallbackData(true);
       // Use sample data as fallback
       setLifts(getSampleLifts());
     }
   };
 
-  const parseLiftData = (resortData) => {
-    // Sample lift locations (you'll need to add real coordinates)
-    const liftLocations = {
-      'Chair 1': { latitude: 37.6308, longitude: -119.0326 },
-      'Gondola': { latitude: 37.6328, longitude: -119.0346 },
-      'Chair 3': { latitude: 37.6288, longitude: -119.0306 },
-      'Chair 23': { latitude: 37.6348, longitude: -119.0366 },
-      'Broadway Express': { latitude: 37.6318, longitude: -119.0316 },
-    };
+  const parseLiftieData = (liftieData) => {
+    /*
+     * Liftie API returns:
+     * {
+     *   lifts: {
+     *     status: { "Broadway Express 1": "open", "Chair 20": "closed", ... },
+     *     stats: { open: 24, closed: 1, ... }
+     *   },
+     *   ll: [-119.037346, 37.651772],  // [longitude, latitude]
+     *   timestamp: { lifts: 1234567890 }
+     * }
+     */
 
-    // Parse the lift info from RapidAPI response
-    const liftsFromAPI = resortData.lifts || [];
-    
-    console.log('API Response:', resortData); // Debug log
-    
-    // If API has lift data, use it
-    if (liftsFromAPI.length > 0) {
-      return liftsFromAPI.map((lift, index) => {
-        // Try to match with known coordinates
-        const coords = liftLocations[lift.name] || {
-          latitude: 37.6308 + (index * 0.002),
-          longitude: -119.0326 + (index * 0.002)
-        };
-        
-        return {
-          id: index + 1,
-          name: lift.name,
-          latitude: coords.latitude,
-          longitude: coords.longitude,
-          status: lift.status || 'Unknown',
-          lastUpdate: resortData.lastUpdated || new Date().toISOString()
-        };
-      });
-    }
-    
-    // Fallback to estimating from totals
-    const openLifts = resortData.liftsOpen || 0;
-    const totalLifts = resortData.liftsTotal || 0;
-    
-    return Object.entries(liftLocations).map((entry, index) => {
-      const [name, coords] = entry;
-      const isOpen = index < openLifts;
+    // Estimated lift locations spread around Mammoth Mountain
+    // In production, these could come from a database or more precise mapping
+    const baseLat = liftieData.ll ? liftieData.ll[1] : 37.651772;
+    const baseLon = liftieData.ll ? liftieData.ll[0] : -119.037346;
+
+    const liftsStatus = liftieData.lifts.status;
+    const liftNames = Object.keys(liftsStatus);
+
+    // Convert Liftie format to our app format
+    return liftNames.map((liftName, index) => {
+      const status = liftsStatus[liftName];
+
+      // Spread lifts around the mountain (simplified distribution)
+      // In a real app, you'd have actual GPS coordinates for each lift
+      const angle = (index / liftNames.length) * 2 * Math.PI;
+      const radius = 0.01; // ~1km spread
+      const latitude = baseLat + (Math.cos(angle) * radius);
+      const longitude = baseLon + (Math.sin(angle) * radius);
+
       return {
         id: index + 1,
-        name: name,
-        latitude: coords.latitude,
-        longitude: coords.longitude,
-        status: isOpen ? 'Open' : 'Closed',
-        lastUpdate: resortData.lastUpdated || new Date().toISOString()
+        name: liftName,
+        latitude: latitude,
+        longitude: longitude,
+        status: status.charAt(0).toUpperCase() + status.slice(1), // Capitalize: "open" -> "Open"
+        lastUpdate: liftieData.timestamp?.lifts
+          ? new Date(liftieData.timestamp.lifts).toISOString()
+          : new Date().toISOString()
       };
     });
   };
@@ -167,6 +204,11 @@ export default function MammothMapView() {
       {/* Legend */}
       <View style={styles.legend}>
         <Text style={styles.legendTitle}>Lift Status</Text>
+        {usingFallbackData && (
+          <View style={styles.demoBadge}>
+            <Text style={styles.demoText}>DEMO DATA</Text>
+          </View>
+        )}
         <View style={styles.legendItem}>
           <View style={[styles.dot, { backgroundColor: '#22c55e' }]} />
           <Text style={styles.legendText}>Open</Text>
@@ -179,7 +221,7 @@ export default function MammothMapView() {
           <View style={[styles.dot, { backgroundColor: '#ef4444' }]} />
           <Text style={styles.legendText}>Closed</Text>
         </View>
-        <TouchableOpacity 
+        <TouchableOpacity
           style={styles.refreshButton}
           onPress={fetchLiftData}
         >
@@ -188,8 +230,15 @@ export default function MammothMapView() {
       </View>
 
       {error && (
-        <View style={styles.errorBanner}>
-          <Text style={styles.errorText}>⚠️ {error}</Text>
+        <View style={[styles.errorBanner, usingFallbackData && styles.warningBanner]}>
+          <Text style={[styles.errorText, usingFallbackData && styles.warningText]}>
+            {usingFallbackData ? '⚠️' : '❌'} {error}
+          </Text>
+          {usingFallbackData && (
+            <Text style={styles.errorSubtext}>
+              Check console for details or verify API key
+            </Text>
+          )}
         </View>
       )}
 
@@ -207,8 +256,8 @@ export default function MammothMapView() {
       {showWeather && weatherData && (
         <View style={styles.weatherCard}>
           <View style={styles.weatherHeader}>
-            <Text style={styles.weatherTitle}>Mammoth Mountain</Text>
-            <TouchableOpacity 
+            <Text style={styles.weatherTitle}>{weatherData.name || 'Mammoth Mountain'}</Text>
+            <TouchableOpacity
               onPress={() => setShowWeather(false)}
               style={styles.closeButton}
             >
@@ -216,82 +265,70 @@ export default function MammothMapView() {
             </TouchableOpacity>
           </View>
 
-          {/* Lifts/Trails Stats - Always show this */}
-          <View style={styles.statsSection}>
-            <View style={styles.statItem}>
-              <Text style={styles.statValue}>{weatherData.liftsOpen || 0}/{weatherData.liftsTotal || 0}</Text>
-              <Text style={styles.statLabel}>Lifts Open</Text>
-            </View>
-            <View style={styles.statItem}>
-              <Text style={styles.statValue}>{weatherData.trailsOpen || 0}/{weatherData.trailsTotal || 0}</Text>
-              <Text style={styles.statLabel}>Trails Open</Text>
-            </View>
-          </View>
-
-          {/* Temperature - if available */}
-          {weatherData.weather?.temp && (
-            <View style={styles.tempSection}>
-              <Text style={styles.tempBig}>{weatherData.weather.temp}°F</Text>
-              <Text style={styles.tempLabel}>{weatherData.weather.condition || 'Current'}</Text>
-            </View>
-          )}
-
-          {/* Snow Report - if available */}
-          {(weatherData.snowReport || weatherData.baseDepth || weatherData.newSnow) && (
-            <View style={styles.snowSection}>
-              <Text style={styles.sectionTitle}>❄️ Snow Report</Text>
-              <View style={styles.snowGrid}>
-                {(weatherData.snowReport?.baseDepth || weatherData.baseDepth) && (
-                  <View style={styles.snowItem}>
-                    <Text style={styles.snowValue}>
-                      {weatherData.snowReport?.baseDepth || weatherData.baseDepth}"
-                    </Text>
-                    <Text style={styles.snowLabel}>Base Depth</Text>
-                  </View>
-                )}
-                {(weatherData.snowReport?.overnight || weatherData.newSnow) && (
-                  <View style={styles.snowItem}>
-                    <Text style={styles.snowValue}>
-                      {weatherData.snowReport?.overnight || weatherData.newSnow}"
-                    </Text>
-                    <Text style={styles.snowLabel}>New Snow</Text>
-                  </View>
-                )}
-                {weatherData.snowReport?.last24 && (
-                  <View style={styles.snowItem}>
-                    <Text style={styles.snowValue}>{weatherData.snowReport.last24}"</Text>
-                    <Text style={styles.snowLabel}>24 Hours</Text>
-                  </View>
-                )}
-                {weatherData.snowReport?.last7Days && (
-                  <View style={styles.snowItem}>
-                    <Text style={styles.snowValue}>{weatherData.snowReport.last7Days}"</Text>
-                    <Text style={styles.snowLabel}>7 Days</Text>
-                  </View>
-                )}
+          {/* Lifts Stats from Liftie */}
+          {weatherData.lifts?.stats && (
+            <View style={styles.statsSection}>
+              <View style={styles.statItem}>
+                <Text style={styles.statValue}>
+                  {weatherData.lifts.stats.open}/{Object.keys(weatherData.lifts.status).length}
+                </Text>
+                <Text style={styles.statLabel}>Lifts Open</Text>
+              </View>
+              <View style={styles.statItem}>
+                <Text style={styles.statValue}>{weatherData.lifts.stats.percentage.open}%</Text>
+                <Text style={styles.statLabel}>Operational</Text>
               </View>
             </View>
           )}
 
-          {/* Conditions - if available */}
-          {weatherData.conditions && (
-            <View style={styles.conditionsSection}>
-              <Text style={styles.sectionTitle}>🎿 Conditions</Text>
-              <Text style={styles.conditionText}>{weatherData.conditions}</Text>
+          {/* Temperature - from Liftie weather data */}
+          {weatherData.weather?.temperature?.max && (
+            <View style={styles.tempSection}>
+              <Text style={styles.tempBig}>{weatherData.weather.temperature.max}°F</Text>
+              <Text style={styles.tempLabel}>{weatherData.weather.conditions || 'Current Conditions'}</Text>
             </View>
           )}
 
-          {/* Show raw data for debugging */}
-          <TouchableOpacity 
-            style={styles.debugButton}
-            onPress={() => console.log('Full API Data:', JSON.stringify(weatherData, null, 2))}
-          >
-            <Text style={styles.debugText}>📊 Show All Data (check console)</Text>
-          </TouchableOpacity>
+          {/* Weather Forecast Text */}
+          {weatherData.weather?.text && (
+            <View style={styles.conditionsSection}>
+              <Text style={styles.sectionTitle}>🌤️ Forecast</Text>
+              <Text style={styles.conditionText}>{weatherData.weather.text}</Text>
+              {weatherData.weather.date && (
+                <Text style={styles.forecastDate}>
+                  For {new Date(weatherData.weather.date).toLocaleDateString()}
+                </Text>
+              )}
+            </View>
+          )}
 
-          {weatherData.lastUpdated && (
+          {/* Resort Status */}
+          {weatherData.open !== undefined && (
+            <View style={styles.statusSection}>
+              <Text style={styles.sectionTitle}>🏔️ Resort Status</Text>
+              <View style={[styles.statusBadge, weatherData.open ? styles.openBadge : styles.closedBadge]}>
+                <Text style={styles.statusBadgeText}>
+                  {weatherData.open ? '✅ OPEN' : '❌ CLOSED'}
+                </Text>
+              </View>
+            </View>
+          )}
+
+          {/* Data Source Attribution */}
+          <View style={styles.attributionSection}>
+            <Text style={styles.attributionText}>
+              Data from Liftie.info • Updated every 60 seconds
+            </Text>
+            {weatherData.weather?.notice && (
+              <Text style={styles.attributionSubtext}>
+                Weather: {weatherData.weather.notice.site || 'NOAA'}
+              </Text>
+            )}
+          </View>
+
+          {weatherData.timestamp?.lifts && (
             <Text style={styles.lastUpdate}>
-              Updated: {new Date(weatherData.lastUpdated).toLocaleString()}
+              Last updated: {new Date(weatherData.timestamp.lifts).toLocaleTimeString()}
             </Text>
           )}
         </View>
@@ -363,6 +400,21 @@ const styles = StyleSheet.create({
     marginBottom: 10,
     color: '#1f2937',
   },
+  demoBadge: {
+    backgroundColor: '#fef3c7',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: '#f59e0b',
+  },
+  demoText: {
+    fontSize: 10,
+    fontWeight: 'bold',
+    color: '#92400e',
+    textAlign: 'center',
+  },
   legendItem: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -404,6 +456,20 @@ const styles = StyleSheet.create({
   errorText: {
     color: '#991b1b',
     fontSize: 14,
+    fontWeight: '600',
+  },
+  errorSubtext: {
+    color: '#991b1b',
+    fontSize: 11,
+    marginTop: 4,
+    fontStyle: 'italic',
+  },
+  warningBanner: {
+    backgroundColor: '#fef3c7',
+    borderLeftColor: '#f59e0b',
+  },
+  warningText: {
+    color: '#92400e',
   },
   liftInfo: {
     position: 'absolute',
@@ -589,15 +655,43 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     fontStyle: 'italic',
   },
-  debugButton: {
-    backgroundColor: '#f3f4f6',
-    padding: 10,
-    borderRadius: 8,
-    marginVertical: 10,
-    alignItems: 'center',
+  forecastDate: {
+    fontSize: 11,
+    color: '#9ca3af',
+    marginTop: 5,
+    fontStyle: 'italic',
   },
-  debugText: {
-    fontSize: 12,
+  statusSection: {
+    marginBottom: 15,
+  },
+  openBadge: {
+    backgroundColor: '#d1fae5',
+    borderColor: '#22c55e',
+  },
+  closedBadge: {
+    backgroundColor: '#fee2e2',
+    borderColor: '#ef4444',
+  },
+  statusBadgeText: {
+    fontSize: 14,
+    fontWeight: 'bold',
+    textAlign: 'center',
+  },
+  attributionSection: {
+    marginTop: 15,
+    paddingTop: 15,
+    borderTopWidth: 1,
+    borderTopColor: '#e5e7eb',
+  },
+  attributionText: {
+    fontSize: 11,
     color: '#6b7280',
+    textAlign: 'center',
+  },
+  attributionSubtext: {
+    fontSize: 10,
+    color: '#9ca3af',
+    textAlign: 'center',
+    marginTop: 3,
   },
 });
